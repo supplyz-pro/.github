@@ -1,0 +1,87 @@
+name: Deploy container
+
+# Reusable: deploy one container to the dev host over SSH, with health check and automatic rollback.
+# Callers must pass `secrets: inherit` so SSH_KEY_DEV, SERVER_USER_DEV and SERVER_IP_DEV are available.
+on:
+  workflow_call:
+    inputs:
+      name:
+        description: Container name on the host
+        required: true
+        type: string
+      image:
+        description: Full image reference including tag, for example ghcr.io/supplyz-pro/frontend/dev:sha-1a2b3c4d
+        required: true
+        type: string
+      publish:
+        description: Host port, optionally with a bind address (127.0.0.1:3280)
+        required: true
+        type: string
+      container-port:
+        required: false
+        type: string
+        default: '80'
+      network:
+        description: Docker network to join (optional)
+        required: false
+        type: string
+        default: ''
+      env-file:
+        description: Path of an existing env file on the host (optional)
+        required: false
+        type: string
+        default: ''
+      health-timeout:
+        description: Seconds to wait for the container to become healthy
+        required: false
+        type: string
+        default: '120'
+      group:
+        description: Concurrency group, so two deploys of the same target never overlap
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  packages: read
+
+concurrency:
+  group: deploy-${{ inputs.group }}
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: [self-hosted, supplyz-dev]
+    timeout-minutes: 15
+    steps:
+      - name: Fetch the deploy script
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          repository: supplyz-pro/.github
+          ref: main
+          sparse-checkout: scripts
+          path: tpl
+      - name: Deploy over SSH
+        env:
+          SSH_KEY: ${{ secrets.SSH_KEY_DEV }}
+          SSH_USER: ${{ secrets.SERVER_USER_DEV }}
+          SSH_HOST: ${{ secrets.SERVER_IP_DEV }}
+          GHCR_TOKEN: ${{ github.token }}
+          NAME: ${{ inputs.name }}
+          IMAGE: ${{ inputs.image }}
+          PUBLISH: ${{ inputs.publish }}
+          CPORT: ${{ inputs.container-port }}
+          NETWORK: ${{ inputs.network }}
+          ENV_FILE: ${{ inputs.env-file }}
+          HEALTH_TIMEOUT: ${{ inputs.health-timeout }}
+        run: |
+          set -euo pipefail
+          key="$(mktemp)"; cfg=''
+          remote() { ssh -i "$key" -o BatchMode=yes -o StrictHostKeyChecking=accept-new "$SSH_USER@$SSH_HOST" "$@"; }
+          cleanup() { [ -z "$cfg" ] || remote "rm -rf '$cfg'" || true; rm -f "$key"; }
+          trap cleanup EXIT
+          printf '%s\n' "$SSH_KEY" > "$key"; chmod 600 "$key"
+          # Throwaway registry login: concurrent deploys cannot log each other out.
+          cfg="$(remote 'umask 077; mktemp -d /tmp/deploy.XXXXXXXX')"
+          printf '%s' "$GHCR_TOKEN" | remote "docker --config '$cfg' login ghcr.io -u github-actions --password-stdin" >/dev/null
+          remote "DOCKER_CONFIG='$cfg' NETWORK='$NETWORK' ENV_FILE='$ENV_FILE' HEALTH_TIMEOUT='$HEALTH_TIMEOUT' bash -s -- '$IMAGE' '$NAME' '$PUBLISH' '$CPORT'" < tpl/scripts/deploy-container.sh

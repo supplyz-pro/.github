@@ -1,0 +1,77 @@
+name: Release
+
+# Reusable: cut a versioned release from a vX.Y.Z tag.
+# The tag must match package.json. The image gets X.Y.Z, X.Y and sha-<commit> tags
+# and GitHub generates the release notes from the merged work.
+on:
+  workflow_call:
+    inputs:
+      image:
+        description: Full image name without a tag
+        required: true
+        type: string
+      title:
+        description: Release title prefix, for example "SupplyzPro frontend"
+        required: true
+        type: string
+      dockerfile:
+        required: false
+        type: string
+        default: Dockerfile
+      context:
+        required: false
+        type: string
+        default: .
+      build-args:
+        description: One KEY=value per line. The literal token __VERSION__ is replaced with the tag, for example v1.2.3.
+        required: false
+        type: string
+        default: ''
+
+permissions:
+  contents: write
+  packages: write
+
+jobs:
+  release:
+    runs-on: [self-hosted, supplyz-dev]
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Tag must match package.json
+        run: |
+          want="v$(python3 -c "import json;print(json.load(open('package.json'))['version'])")"
+          [ "$want" = "$GITHUB_REF_NAME" ] || { echo "Tag $GITHUB_REF_NAME does not match package.json ($want)"; exit 1; }
+      - name: Log in to GHCR
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: echo "$GH_TOKEN" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+      - name: Build and push versioned image
+        env:
+          IMAGE: ${{ inputs.image }}
+          DOCKERFILE: ${{ inputs.dockerfile }}
+          CONTEXT: ${{ inputs.context }}
+          BUILD_ARGS: ${{ inputs.build-args }}
+          DOCKER_BUILDKIT: '1'
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"; minor="${version%.*}"; sha="sha-$(git rev-parse --short=8 HEAD)"
+          args=(-f "$DOCKERFILE" -t "$IMAGE:$version" -t "$IMAGE:$minor" -t "$IMAGE:$sha"
+            --label "org.opencontainers.image.source=https://github.com/${GITHUB_REPOSITORY}"
+            --label "org.opencontainers.image.revision=${GITHUB_SHA}"
+            --label "org.opencontainers.image.version=${version}")
+          while IFS= read -r line; do [ -z "$line" ] || args+=(--build-arg "${line//__VERSION__/$GITHUB_REF_NAME}"); done <<< "$BUILD_ARGS"
+          docker build "${args[@]}" "$CONTEXT"
+          for t in "$version" "$minor" "$sha"; do docker push "$IMAGE:$t"; done
+      - name: Log out
+        if: always()
+        run: docker logout ghcr.io || true
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TITLE: ${{ inputs.title }}
+        run: |
+          jq -n --arg tag "$GITHUB_REF_NAME" --arg name "$TITLE $GITHUB_REF_NAME" \
+            '{tag_name: $tag, name: $name, generate_release_notes: true}' |
+          curl -fsS -X POST "https://api.github.com/repos/$GITHUB_REPOSITORY/releases" \
+            -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" -d @-

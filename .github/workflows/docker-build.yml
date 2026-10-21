@@ -1,0 +1,92 @@
+name: Docker build
+
+# Reusable: build an image on the self-hosted runner and push it to GHCR.
+# Every image gets an immutable sha-<commit> tag plus an optional moving tag (dev, preprod, ...).
+on:
+  workflow_call:
+    inputs:
+      image:
+        description: Full image name without a tag, for example ghcr.io/supplyz-pro/frontend/dev
+        required: true
+        type: string
+      moving-tag:
+        description: Moving tag to point at this build (dev, preprod). Leave empty for none.
+        required: false
+        type: string
+        default: ''
+      dockerfile:
+        required: false
+        type: string
+        default: Dockerfile
+      context:
+        required: false
+        type: string
+        default: .
+      build-args:
+        description: One KEY=value per line
+        required: false
+        type: string
+        default: ''
+      labels:
+        description: Extra image labels, one KEY=value per line
+        required: false
+        type: string
+        default: ''
+    outputs:
+      tag:
+        description: The immutable sha-<commit> tag
+        value: ${{ jobs.build.outputs.tag }}
+      ref:
+        description: image:tag that was pushed
+        value: ${{ jobs.build.outputs.ref }}
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build:
+    runs-on: [self-hosted, supplyz-dev]
+    timeout-minutes: 30
+    outputs:
+      tag: ${{ steps.meta.outputs.tag }}
+      ref: ${{ steps.meta.outputs.ref }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - id: meta
+        env:
+          IMAGE: ${{ inputs.image }}
+        run: |
+          tag="sha-$(git rev-parse --short=8 HEAD)"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "ref=$IMAGE:$tag" >> "$GITHUB_OUTPUT"
+      - name: Log in to GHCR
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: echo "$GH_TOKEN" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+      - name: Build and push
+        env:
+          IMAGE: ${{ inputs.image }}
+          MOVING_TAG: ${{ inputs.moving-tag }}
+          DOCKERFILE: ${{ inputs.dockerfile }}
+          CONTEXT: ${{ inputs.context }}
+          BUILD_ARGS: ${{ inputs.build-args }}
+          EXTRA_LABELS: ${{ inputs.labels }}
+          TAG: ${{ steps.meta.outputs.tag }}
+          DOCKER_BUILDKIT: '1'
+        run: |
+          set -euo pipefail
+          args=(-f "$DOCKERFILE" -t "$IMAGE:$TAG"
+            --label "org.opencontainers.image.source=https://github.com/${GITHUB_REPOSITORY}"
+            --label "org.opencontainers.image.revision=${GITHUB_SHA}"
+            --label "org.opencontainers.image.version=${TAG}")
+          [ -z "$MOVING_TAG" ] || args+=(-t "$IMAGE:$MOVING_TAG")
+          while IFS= read -r line; do [ -z "$line" ] || args+=(--build-arg "$line"); done <<< "$BUILD_ARGS"
+          while IFS= read -r line; do [ -z "$line" ] || args+=(--label "$line"); done <<< "$EXTRA_LABELS"
+          # No --pull: the host keeps base images warm, so unchanged layers come straight from cache.
+          docker build "${args[@]}" "$CONTEXT"
+          docker push "$IMAGE:$TAG"
+          [ -z "$MOVING_TAG" ] || docker push "$IMAGE:$MOVING_TAG"
+      - name: Log out
+        if: always()
+        run: docker logout ghcr.io || true
