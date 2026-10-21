@@ -31,6 +31,11 @@ on:
         required: false
         type: string
         default: ''
+      docker-args:
+        description: Extra docker run flags, for example "--memory 512m"
+        required: false
+        type: string
+        default: ''
       health-timeout:
         description: Seconds to wait for the container to become healthy
         required: false
@@ -73,6 +78,7 @@ jobs:
           CPORT: ${{ inputs.container-port }}
           NETWORK: ${{ inputs.network }}
           ENV_FILE: ${{ inputs.env-file }}
+          DOCKER_ARGS: ${{ inputs.docker-args }}
           HEALTH_TIMEOUT: ${{ inputs.health-timeout }}
         run: |
           set -euo pipefail
@@ -84,4 +90,4 @@ jobs:
           # Throwaway registry login: concurrent deploys cannot log each other out.
           cfg="$(remote 'umask 077; mktemp -d /tmp/deploy.XXXXXXXX')"
           printf '%s' "$GHCR_TOKEN" | remote "docker --config '$cfg' login ghcr.io -u github-actions --password-stdin" >/dev/null
-          remote "DOCKER_CONFIG='$cfg' NETWORK='$NETWORK' ENV_FILE='$ENV_FILE' HEALTH_TIMEOUT='$HEALTH_TIMEOUT' bash -s -- '$IMAGE' '$NAME' '$PUBLISH' '$CPORT'" < tpl/scripts/deploy-container.sh
+          remote "DOCKER_CONFIG='$cfg' NETWORK='$NETWORK' ENV_FILE='$ENV_FILE' DOCKER_ARGS='$DOCKER_ARGS' HEALTH_TIMEOUT='$HEALTH_TIMEOUT' bash -s -- '$IMAGE' '$NAME' '$PUBLISH' '$CPORT'" < tpl/scripts/deploy-container.sh

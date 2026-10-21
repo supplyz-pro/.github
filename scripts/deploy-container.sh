@@ -4,7 +4,7 @@
 # If the new container never becomes healthy, it is removed and the old one is started again.
 #
 # Usage:   deploy-container.sh <image:tag> <container-name> <[bind-ip:]host-port> [container-port]
-# Options (environment): NETWORK, ENV_FILE, HEALTH_TIMEOUT (seconds, default 120), DOCKER_CONFIG
+# Options (environment): NETWORK, ENV_FILE, DOCKER_ARGS (extra docker run flags), HEALTH_TIMEOUT (seconds, default 120), DOCKER_CONFIG
 set -euo pipefail
 
 IMAGE="${1:?Image reference is required}"
@@ -14,12 +14,14 @@ CPORT="${4:-80}"
 NETWORK="${NETWORK:-}"
 ENV_FILE="${ENV_FILE:-}"
 HEALTH_TIMEOUT="${HEALTH_TIMEOUT:-120}"
+DOCKER_ARGS="${DOCKER_ARGS:-}"
 
 [[ "$IMAGE" =~ ^[a-zA-Z0-9_./:@-]+$ ]] || { echo 'Invalid image reference' >&2; exit 1; }
 [[ "$NAME" =~ ^[a-zA-Z0-9_.-]+$ ]] || { echo 'Invalid container name' >&2; exit 1; }
 [[ "$PUBLISH" =~ ^([0-9.]+:)?[0-9]{2,5}$ ]] || { echo 'Invalid published port' >&2; exit 1; }
 [[ "$CPORT" =~ ^[0-9]{2,5}$ ]] || { echo 'Invalid container port' >&2; exit 1; }
 [[ -z "$NETWORK" || "$NETWORK" =~ ^[a-zA-Z0-9_.-]+$ ]] || { echo 'Invalid network' >&2; exit 1; }
+[[ -z "$DOCKER_ARGS" || "$DOCKER_ARGS" =~ ^[a-zA-Z0-9_./=:@\ -]+$ ]] || { echo 'Invalid docker args' >&2; exit 1; }
 
 PREVIOUS="${NAME}-previous"
 
@@ -37,7 +39,9 @@ fi
 args=(-d --name "$NAME" -p "$PUBLISH:$CPORT" --restart unless-stopped)
 [ -z "$NETWORK" ] || args+=(--network "$NETWORK")
 [ -z "$ENV_FILE" ] || args+=(--env-file "$ENV_FILE")
-docker run "${args[@]}" "$IMAGE" >/dev/null
+# shellcheck disable=SC2206
+extra=($DOCKER_ARGS)
+docker run "${args[@]}" "${extra[@]}" "$IMAGE" >/dev/null
 
 healthy=false
 deadline=$((SECONDS + HEALTH_TIMEOUT))

@@ -13,6 +13,16 @@ on:
         description: GitLab project path, for example supplyz-pro/crm
         required: true
         type: string
+      deploy-workflow:
+        description: Workflow file to dispatch when a deploy branch received new commits (for example deploy.yml). Empty to disable.
+        required: false
+        type: string
+        default: ''
+      deploy-branches:
+        description: Space separated branches that deploy
+        required: false
+        type: string
+        default: 'dev preprod'
     secrets:
       GITLAB_DEPLOY_USER:
         required: true
@@ -21,6 +31,7 @@ on:
 
 permissions:
   contents: write
+  actions: write
 
 concurrency:
   group: sync-gitlab-${{ github.repository }}
@@ -37,6 +48,8 @@ jobs:
           GL_TOKEN: ${{ secrets.GITLAB_DEPLOY_TOKEN }}
           GH_TOKEN: ${{ github.token }}
           PROJECT: ${{ inputs.gitlab-project }}
+          DEPLOY_WORKFLOW: ${{ inputs.deploy-workflow }}
+          DEPLOY_BRANCHES: ${{ inputs.deploy-branches }}
           REPO: ${{ github.repository }}
         run: |
           set -uo pipefail
@@ -54,23 +67,23 @@ jobs:
           gh_git fetch -q origin '+refs/heads/*:refs/remotes/origin/*' '+refs/tags/*:refs/tags/*'
           gl_git fetch -q gitlab '+refs/heads/*:refs/remotes/gitlab/*' '+refs/tags/*:refs/gl-tags/*'
 
-          pushed=0; merged=0; failed=0
+          pushed=0; merged=0; failed=0; changed=()
           while IFS= read -r b; do
             [ -n "$b" ] && [ "$b" != HEAD ] || continue
             gl="$(git rev-parse "refs/remotes/gitlab/$b")"
             if ! gh="$(git rev-parse -q --verify "refs/remotes/origin/$b")"; then
-              if gh_git push -q origin "$gl:refs/heads/$b"; then echo "new branch: $b"; pushed=$((pushed+1)); else echo "::warning::could not create $b"; failed=1; fi
+              if gh_git push -q origin "$gl:refs/heads/$b"; then echo "new branch: $b"; pushed=$((pushed+1)); changed+=("$b"); else echo "::warning::could not create $b"; failed=1; fi
               continue
             fi
             [ "$gl" != "$gh" ] || continue
             git merge-base --is-ancestor "$gl" "$gh" && continue            # GitHub already contains it
             if git merge-base --is-ancestor "$gh" "$gl"; then               # GitLab is ahead: fast-forward
-              if gh_git push -q origin "$gl:refs/heads/$b"; then echo "fast-forward: $b"; pushed=$((pushed+1)); else echo "::warning::fast-forward of $b rejected"; failed=1; fi
+              if gh_git push -q origin "$gl:refs/heads/$b"; then echo "fast-forward: $b"; pushed=$((pushed+1)); changed+=("$b"); else echo "::warning::fast-forward of $b rejected"; failed=1; fi
               continue
             fi
             git checkout -q --detach "$gh"                                   # diverged: merge GitLab into GitHub's branch
             if git merge -q --no-edit -m "Merge GitLab $b into GitHub" "$gl" >/dev/null 2>&1; then
-              if gh_git push -q origin "HEAD:refs/heads/$b"; then echo "merged: $b"; merged=$((merged+1)); else echo "::warning::push of merged $b rejected"; failed=1; fi
+              if gh_git push -q origin "HEAD:refs/heads/$b"; then echo "merged: $b"; merged=$((merged+1)); changed+=("$b"); else echo "::warning::push of merged $b rejected"; failed=1; fi
             else
               git merge --abort 2>/dev/null || true
               echo "::warning::$b has conflicting changes on GitHub and GitLab; left untouched"; failed=1
@@ -82,6 +95,19 @@ jobs:
             git rev-parse -q --verify "refs/tags/$t" >/dev/null && continue
             if gh_git push -q origin "refs/gl-tags/$t:refs/tags/$t"; then echo "new tag: $t"; else echo "::warning::could not push tag $t"; failed=1; fi
           done < <(git for-each-ref refs/gl-tags --format='%(refname:strip=2)')
+
+          # Pushes made with the workflow token do not start other workflows, so start the deploy explicitly
+          # for the environment branches that just received new commits.
+          if [ -n "$DEPLOY_WORKFLOW" ]; then
+            for b in "${changed[@]:-}"; do
+              [ -n "$b" ] || continue
+              case " $DEPLOY_BRANCHES " in *" $b "*) ;; *) continue ;; esac
+              code="$(curl -s -o /dev/null -w '%{http_code}' -X POST \
+                -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" \
+                "https://api.github.com/repos/$REPO/actions/workflows/$DEPLOY_WORKFLOW/dispatches" -d "{\"ref\":\"$b\"}")"
+              if [ "$code" = 204 ]; then echo "deploy started for $b"; else echo "::warning::could not start $DEPLOY_WORKFLOW on $b (HTTP $code)"; fi
+            done
+          fi
 
           echo "Sync finished: $pushed branch(es) updated, $merged merged."
           [ "$failed" = 0 ]
