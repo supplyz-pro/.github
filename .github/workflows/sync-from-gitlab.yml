@@ -1,0 +1,87 @@
+name: Sync from GitLab
+
+# Reusable: one-way sync GitLab -> GitHub while the team still works on GitLab.
+# - New GitLab branches and tags are created on GitHub.
+# - A GitLab branch that is ahead is fast-forwarded.
+# - A branch that has diverged (GitHub has its own commits, for example CI or README changes)
+#   gets GitLab merged into it. A conflict is reported and skipped, never forced.
+# Nothing is ever deleted or force-pushed, and GitHub-only commits are never overwritten.
+on:
+  workflow_call:
+    inputs:
+      gitlab-project:
+        description: GitLab project path, for example supplyz-pro/crm
+        required: true
+        type: string
+    secrets:
+      GITLAB_DEPLOY_USER:
+        required: true
+      GITLAB_DEPLOY_TOKEN:
+        required: true
+
+permissions:
+  contents: write
+
+concurrency:
+  group: sync-gitlab-${{ github.repository }}
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: [self-hosted, supplyz-dev]
+    timeout-minutes: 15
+    steps:
+      - name: Sync branches and tags
+        env:
+          GL_USER: ${{ secrets.GITLAB_DEPLOY_USER }}
+          GL_TOKEN: ${{ secrets.GITLAB_DEPLOY_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
+          PROJECT: ${{ inputs.gitlab-project }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -uo pipefail
+          work="$(mktemp -d)"; trap 'rm -rf "$work"' EXIT; cd "$work"
+          git init -q .
+          git config user.name "supplyz-gitlab-sync"; git config user.email "noreply@github.com"
+          gh_auth="Authorization: Basic $(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)"
+          gl_auth="Authorization: Basic $(printf '%s:%s' "$GL_USER" "$GL_TOKEN" | base64 -w0)"
+          echo "::add-mask::$gl_auth"
+          git remote add origin "https://github.com/$REPO.git"
+          git remote add gitlab "https://gitlab.com/$PROJECT.git"
+          gh_git() { git -c "http.extraheader=$gh_auth" "$@"; }
+          gl_git() { git -c "http.extraheader=$gl_auth" "$@"; }
+
+          gh_git fetch -q origin '+refs/heads/*:refs/remotes/origin/*' '+refs/tags/*:refs/tags/*'
+          gl_git fetch -q gitlab '+refs/heads/*:refs/remotes/gitlab/*' '+refs/tags/*:refs/gl-tags/*'
+
+          pushed=0; merged=0; failed=0
+          while IFS= read -r b; do
+            [ -n "$b" ] && [ "$b" != HEAD ] || continue
+            gl="$(git rev-parse "refs/remotes/gitlab/$b")"
+            if ! gh="$(git rev-parse -q --verify "refs/remotes/origin/$b")"; then
+              if gh_git push -q origin "$gl:refs/heads/$b"; then echo "new branch: $b"; pushed=$((pushed+1)); else echo "::warning::could not create $b"; failed=1; fi
+              continue
+            fi
+            [ "$gl" != "$gh" ] || continue
+            git merge-base --is-ancestor "$gl" "$gh" && continue            # GitHub already contains it
+            if git merge-base --is-ancestor "$gh" "$gl"; then               # GitLab is ahead: fast-forward
+              if gh_git push -q origin "$gl:refs/heads/$b"; then echo "fast-forward: $b"; pushed=$((pushed+1)); else echo "::warning::fast-forward of $b rejected"; failed=1; fi
+              continue
+            fi
+            git checkout -q --detach "$gh"                                   # diverged: merge GitLab into GitHub's branch
+            if git merge -q --no-edit -m "Merge GitLab $b into GitHub" "$gl" >/dev/null 2>&1; then
+              if gh_git push -q origin "HEAD:refs/heads/$b"; then echo "merged: $b"; merged=$((merged+1)); else echo "::warning::push of merged $b rejected"; failed=1; fi
+            else
+              git merge --abort 2>/dev/null || true
+              echo "::warning::$b has conflicting changes on GitHub and GitLab; left untouched"; failed=1
+            fi
+          done < <(git for-each-ref refs/remotes/gitlab --format='%(refname:strip=3)')
+
+          while IFS= read -r t; do
+            [ -n "$t" ] || continue
+            git rev-parse -q --verify "refs/tags/$t" >/dev/null && continue
+            if gh_git push -q origin "refs/gl-tags/$t:refs/tags/$t"; then echo "new tag: $t"; else echo "::warning::could not push tag $t"; failed=1; fi
+          done < <(git for-each-ref refs/gl-tags --format='%(refname:strip=2)')
+
+          echo "Sync finished: $pushed branch(es) updated, $merged merged."
+          [ "$failed" = 0 ]
