@@ -20,7 +20,7 @@ on:
       install_command: { required: false, type: string, default: 'npm ci --no-audit --no-fund' }
       verify_command: { required: false, type: string, default: 'npm run check --if-present' }
       triage_budget_usd: { required: false, type: string, default: '0.40' }
-      fix_budget_usd: { required: false, type: string, default: '4' }
+      fix_budget_usd: { required: false, type: string, default: '3' }
     secrets:
       ANTHROPIC_API_KEY: { required: true }
       INCIDENT_WEBHOOK_SECRET: { required: true }
