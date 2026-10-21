@@ -76,6 +76,55 @@ jobs:
               || echo "::warning::could not report '$phase' to the CRM"
           }
           EOF
+          cat > "$RUNNER_TEMP/agent/stream.py" <<'PYEOF'
+          # Reads Claude Code's stream-json output, tells the CRM what it is doing (throttled), and saves the final result event.
+          import hashlib, hmac, json, os, sys, time, urllib.request
+          out_path, stage = sys.argv[1], sys.argv[2]
+          secret = os.environ.get("WEBHOOK_SECRET", "").encode()
+          url = os.environ["CRM_URL"].rstrip("/") + "/api/integrations/incidents/events"
+          workspace = os.environ.get("GITHUB_WORKSPACE", "")
+          INTERVAL = float(os.environ.get("STREAM_INTERVAL", "12"))
+
+          def rel(path):
+              path = str(path or "")
+              return path[len(workspace) + 1:] if workspace and path.startswith(workspace + "/") else path
+
+          def label(block):
+              name, data = block.get("name", ""), block.get("input") or {}
+              if name == "Read": return "Reading " + rel(data.get("file_path"))
+              if name in ("Edit", "Write", "MultiEdit"): return "Editing " + rel(data.get("file_path"))
+              if name in ("Grep", "Glob"): return "Searching the code for " + str(data.get("pattern") or data.get("query") or "")[:60]
+              if name == "Bash":
+                  cmd = str(data.get("command") or "")
+                  return "Running the tests" if any(t in cmd for t in ("test", "jest", "vitest", "lint", "check")) else "Running " + cmd[:50]
+              return name or "Working"
+
+          def post(message):
+              payload = {"incidentId": os.environ["INCIDENT_ID"], "runKey": os.environ["RUN_KEY"], "phase": "activity",
+                         "stage": stage, "message": message[:280], "costUsd": float(os.environ.get("COST") or 0)}
+              if os.environ.get("RUN_URL"): payload["runUrl"] = os.environ["RUN_URL"]
+              body = json.dumps(payload, separators=(",", ":")).encode()
+              sig = hmac.new(secret, body, hashlib.sha256).hexdigest()
+              req = urllib.request.Request(url, data=body, method="POST", headers={
+                  "content-type": "application/json", "x-signature": sig, "idempotency-key": f"{os.environ['RUN_KEY']}-act-{time.time_ns()}"})
+              try: urllib.request.urlopen(req, timeout=10).read()
+              except Exception: pass  # progress is best effort: it must never stop the work
+
+          last, steps, result = 0.0, 0, None
+          for line in sys.stdin:
+              try: event = json.loads(line)
+              except Exception: continue
+              if event.get("type") == "assistant":
+                  for block in (event.get("message") or {}).get("content") or []:
+                      if block.get("type") == "tool_use":
+                          steps += 1
+                          if time.time() - last >= INTERVAL:
+                              post(f"{label(block)} ({steps} steps so far)")
+                              last = time.time()
+              elif event.get("type") == "result":
+                  result = event
+          json.dump(result if result is not None else {"result": "", "is_error": True, "total_cost_usd": 0}, open(out_path, "w"))
+          PYEOF
           echo "COST=0" >> "$GITHUB_ENV"
 
       - name: Report start
@@ -132,12 +181,14 @@ jobs:
             "risk": what could break, and how big the blast radius is.
             "reason": if not fixable, why a human is needed.
           EOF
+          report activity "Reading the code to find the cause" '{"stage":"analysing"}'
           out="$RUNNER_TEMP/agent/triage.json"
           claude -p "$(cat "$RUNNER_TEMP/agent/triage-prompt.md")
           Incident file: $RUNNER_TEMP/agent/incident.md" \
             --model "$TRIAGE_MODEL" --max-budget-usd "${{ inputs.triage_budget_usd }}" \
             --allowedTools "Read Grep Glob" --disallowedTools "Bash Edit Write WebFetch WebSearch" \
-            --add-dir "$RUNNER_TEMP/agent" --output-format json --no-session-persistence > "$out" 2> "$RUNNER_TEMP/agent/triage.err" || true
+            --add-dir "$RUNNER_TEMP/agent" --output-format stream-json --verbose --no-session-persistence 2> "$RUNNER_TEMP/agent/triage.err" \
+            | python3 "$RUNNER_TEMP/agent/stream.py" "$out" analysing || true
           cost="$(jq -r '.total_cost_usd // 0' "$out" 2>/dev/null || echo 0)"
           echo "COST=$cost" >> "$GITHUB_ENV"; export COST="$cost"
           python3 - <<'PY' > "$RUNNER_TEMP/agent/triage-parsed.json"
@@ -159,7 +210,12 @@ jobs:
 
       - name: Install dependencies
         if: steps.triage.outputs.fixable == 'true'
-        run: ${{ inputs.install_command }}
+        env:
+          WEBHOOK_SECRET: ${{ secrets.INCIDENT_WEBHOOK_SECRET }}
+        run: |
+          source "$RUNNER_TEMP/agent/report.sh"
+          report activity "Preparing the project so the change can be tested" '{"stage":"installing"}'
+          ${{ inputs.install_command }}
 
       # Stage 2: the actual fix. A hard dollar cap per run, edits plus the repo's own checks only, no network tools.
       - name: Fix with Sonnet
@@ -172,6 +228,7 @@ jobs:
           set -uo pipefail
           source "$RUNNER_TEMP/agent/report.sh"
           report fixing "Claude is making the change"
+          report activity "Planning the change from the analysis" '{"stage":"fixing"}'
           plan="$(jq -r '"Cause: \(.cause)\nPlan: \(.plan)\nRisk: \(.risk)"' "$RUNNER_TEMP/agent/triage-parsed.json")"
           if [ "$MODE" = hotfix ]; then
             rules="This is a PRODUCTION HOTFIX. Make the smallest possible change that stops the problem. No refactors, no renames, no dependency changes, no unrelated fixes."
@@ -198,7 +255,8 @@ jobs:
             --model "$FIX_MODEL" --max-budget-usd "${{ inputs.fix_budget_usd }}" --permission-mode acceptEdits \
             --allowedTools "Read Grep Glob Edit Write Bash(git diff:*) Bash(git status:*) Bash(npm test:*) Bash(npm run test:*) Bash(npx jest:*) Bash(npx vitest:*) Bash(npm run lint:*) Bash(npm run check:*)" \
             --disallowedTools "WebFetch WebSearch" \
-            --add-dir "$RUNNER_TEMP/agent" --output-format json --no-session-persistence > "$out" 2> "$RUNNER_TEMP/agent/fix.err" || true
+            --add-dir "$RUNNER_TEMP/agent" --output-format stream-json --verbose --no-session-persistence 2> "$RUNNER_TEMP/agent/fix.err" \
+            | python3 "$RUNNER_TEMP/agent/stream.py" "$out" fixing || true
           fix_cost="$(jq -r '.total_cost_usd // 0' "$out" 2>/dev/null || echo 0)"
           total="$(python3 -c "print(round(${COST:-0} + $fix_cost, 4))")"
           echo "COST=$total" >> "$GITHUB_ENV"; export COST="$total"
@@ -231,6 +289,7 @@ jobs:
             echo "changed=false" >> "$GITHUB_OUTPUT"; exit 0
           fi
           echo "changed=true" >> "$GITHUB_OUTPUT"
+          report activity "Running the repository checks on the change" '{"stage":"verifying"}'
           if ! (${{ inputs.verify_command }}) > "$RUNNER_TEMP/agent/verify.log" 2>&1; then
             tail -c 1500 "$RUNNER_TEMP/agent/verify.log" > "$RUNNER_TEMP/agent/verify-tail.txt"
             report needs_human "Claude's change did not pass the repository checks, so no PR was opened. $(tr '\n' ' ' < "$RUNNER_TEMP/agent/verify-tail.txt")"
@@ -250,6 +309,7 @@ jobs:
         run: |
           set -uo pipefail
           source "$RUNNER_TEMP/agent/report.sh"
+          report activity "Opening the pull request for review" '{"stage":"opening_pr"}'
           branch="claude/incident-${{ inputs.number }}-$MODE"
           git config user.name "Claude (SupplyzPro incident agent)"
           git config user.email "noreply@anthropic.com"
