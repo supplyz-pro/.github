@@ -1,0 +1,21 @@
+name: Install dependencies (skips when unchanged)
+description: >
+  Runs `npm ci` only when package-lock.json, Node or npm changed since the last install in this workspace.
+  Self-hosted runners keep their workspace between jobs (use `clean: false` on checkout), so most runs skip the
+  install entirely. On a fresh GitHub-hosted runner it simply installs. Everything except node_modules is cleaned.
+
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      run: |
+        set -euo pipefail
+        # Remove leftovers of earlier jobs (build output, coverage, reports) but keep the installed modules.
+        git clean -ffdxq -e node_modules || true
+        stamp="$(printf '%s\n%s\n%s\n' "$(sha256sum package-lock.json | cut -d' ' -f1)" "$(node -v)" "$(npm -v)" | sha256sum | cut -d' ' -f1)"
+        if [ -f node_modules/.supplyz-install-stamp ] && [ "$(cat node_modules/.supplyz-install-stamp)" = "$stamp" ]; then
+          echo "Dependencies unchanged since the last install, skipping npm ci."
+        else
+          npm ci --prefer-offline --no-audit --no-fund
+          printf '%s' "$stamp" > node_modules/.supplyz-install-stamp
+        fi
