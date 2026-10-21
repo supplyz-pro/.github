@@ -83,10 +83,12 @@ jobs:
           #        db.sh count <database> <collection> [filter-json]
           #        db.sh collections <database>
           set -euo pipefail
-          op="${1:?operation}"; database="${2:?database}"; collection="${3:-}"; filter="${4:-}"; limit="${5:-5}"
+          #        db.sh [prod] databases      (prefix "prod" only when the report is about production)
+          source=dev; if [ "${1:-}" = "prod" ]; then source=prod; shift; fi
+          op="${1:?operation}"; database="${2:-}"; collection="${3:-}"; filter="${4:-}"; limit="${5:-5}"
           [ -n "$filter" ] || filter='{}'
-          body="$(jq -cn --arg i "$INCIDENT_ID" --arg r "$RUN_KEY" --arg op "$op" --arg d "$database" --arg c "$collection" --argjson f "$filter" --argjson l "$limit" \
-            '{incidentId:$i, runKey:$r, op:$op, database:$d, filter:$f, limit:$l} + (if $c == "" then {} else {collection:$c} end)')"
+          body="$(jq -cn --arg i "$INCIDENT_ID" --arg r "$RUN_KEY" --arg op "$op" --arg s "$source" --arg d "$database" --arg c "$collection" --argjson f "$filter" --argjson l "$limit" \
+            '{incidentId:$i, runKey:$r, op:$op, source:$s, database:$d, filter:$f, limit:$l} + (if $c == "" then {} else {collection:$c} end)')"
           sig="$(printf '%s' "$body" | openssl dgst -sha256 -hmac "$WEBHOOK_SECRET" | sed 's/^.* //')"
           curl -sS -m 25 -X POST "$CRM_URL/api/integrations/incidents/db" -H 'content-type: application/json' \
             -H "idempotency-key: $RUN_KEY-db-$(date +%s%N)" -H "x-signature: $sig" --data-binary "$body" | jq -c '.data // .error // .'
@@ -195,8 +197,9 @@ jobs:
           improvement in the named area (clarity, layout, spacing, empty and loading states, accessibility, wording). If the report is vague, still
           propose the most valuable small improvement you can see after reading the code, and set fixable true. Never change behaviour or data flow for an Improvement.
           Data lookups (read only, optional): when real data would explain a bug, run the data helper given below with Bash, at most 5 times:
-            db.sh collections <database> | db.sh count <database> <collection> '<filter-json>' | db.sh find <database> <collection> '<filter-json>' [limit<=20]
-          Databases: "stocx" holds the backend and dashboard data, "crm" holds CRM data. Dates and ids in filters: {"$date":"2026-01-01T00:00:00Z"}, {"$oid":"..."}.
+            db.sh databases | db.sh collections <database> | db.sh count <database> <collection> '<filter-json>' | db.sh find <database> <collection> '<filter-json>' [limit<=20]
+          Default source is development: "stocx" (backend and dashboard data), "crm" (CRM data) and "supplyzpro_preprod" (preprod). Put the word prod first
+          ("db.sh prod databases", "db.sh prod find <database> ...") only when the report is about production behaviour; start with "prod databases" to learn the names there. Dates and ids in filters: {"$date":"2026-01-01T00:00:00Z"}, {"$oid":"..."}.
           Answers are already redacted and capped. Never copy personal data, emails or ids of real people into your reply.
           If the report is too vague to know what is wrong and you cannot infer a useful change from the code, ask instead of guessing.
           Reply with ONLY a JSON object, no other text, with these keys:
