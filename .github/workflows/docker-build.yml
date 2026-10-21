@@ -32,6 +32,11 @@ on:
         required: false
         type: string
         default: ''
+      plain-sha-tag:
+        description: Also push the bare 8-character commit hash as a tag (for deploy scripts that compare it with the revision label)
+        required: false
+        type: boolean
+        default: false
     outputs:
       tag:
         description: The immutable sha-<commit> tag
@@ -39,6 +44,9 @@ on:
       ref:
         description: image:tag that was pushed
         value: ${{ jobs.build.outputs.ref }}
+      short:
+        description: The bare 8-character commit hash
+        value: ${{ jobs.build.outputs.short }}
 
 permissions:
   contents: read
@@ -51,6 +59,7 @@ jobs:
     outputs:
       tag: ${{ steps.meta.outputs.tag }}
       ref: ${{ steps.meta.outputs.ref }}
+      short: ${{ steps.meta.outputs.short }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - id: meta
@@ -59,6 +68,7 @@ jobs:
         run: |
           tag="sha-$(git rev-parse --short=8 HEAD)"
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "short=$(git rev-parse --short=8 HEAD)" >> "$GITHUB_OUTPUT"
           echo "ref=$IMAGE:$tag" >> "$GITHUB_OUTPUT"
       - name: Log in to GHCR
         env:
@@ -68,6 +78,8 @@ jobs:
         env:
           IMAGE: ${{ inputs.image }}
           MOVING_TAG: ${{ inputs.moving-tag }}
+          PLAIN_SHA_TAG: ${{ inputs.plain-sha-tag }}
+          SHORT: ${{ steps.meta.outputs.short }}
           DOCKERFILE: ${{ inputs.dockerfile }}
           CONTEXT: ${{ inputs.context }}
           BUILD_ARGS: ${{ inputs.build-args }}
@@ -81,12 +93,14 @@ jobs:
             --label "org.opencontainers.image.revision=${GITHUB_SHA}"
             --label "org.opencontainers.image.version=${TAG}")
           [ -z "$MOVING_TAG" ] || args+=(-t "$IMAGE:$MOVING_TAG")
+          [ "$PLAIN_SHA_TAG" != true ] || args+=(-t "$IMAGE:$SHORT")
           while IFS= read -r line; do [ -z "$line" ] || args+=(--build-arg "$line"); done <<< "$BUILD_ARGS"
           while IFS= read -r line; do [ -z "$line" ] || args+=(--label "$line"); done <<< "$EXTRA_LABELS"
           # No --pull: the host keeps base images warm, so unchanged layers come straight from cache.
           docker build "${args[@]}" "$CONTEXT"
           docker push "$IMAGE:$TAG"
           [ -z "$MOVING_TAG" ] || docker push "$IMAGE:$MOVING_TAG"
+          [ "$PLAIN_SHA_TAG" != true ] || docker push "$IMAGE:$SHORT"
       - name: Log out
         if: always()
         run: docker logout ghcr.io || true
