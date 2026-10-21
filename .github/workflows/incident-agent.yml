@@ -205,6 +205,7 @@ jobs:
           If the report is too vague to know what is wrong and you cannot infer a useful change from the code, ask instead of guessing.
           Reply with ONLY a JSON object, no other text, with these keys:
             "needs_info": true only if a person must answer questions first; then give "questions": up to 3 short, specific questions (what page, what you saw vs expected, since when, which account type).
+            "wrong_repo": only if the cause clearly lies in another repository: one of frontend (web dashboard), backend (API and data), crm (internal CRM tool), dali (AI assistant service). Then fixable is false.
             "fixable": true if a small, safe code change in this repository can fix or mitigate it; false if it needs production data, access, infrastructure, a decision, or a large redesign.
             "cause": one or two sentences naming the likely root cause and the file(s).
             "plan": the smallest change that fixes it, as short steps. Include which existing test to run or add.
@@ -230,6 +231,7 @@ jobs:
           except Exception: d = {}
           print(json.dumps({"fixable": d.get("fixable") is True, "cause": str(d.get("cause", ""))[:3500], "plan": str(d.get("plan", ""))[:3500],
                             "risk": str(d.get("risk", ""))[:1800], "reason": str(d.get("reason", ""))[:1500],
+                            "wrong_repo": d.get("wrong_repo") if d.get("wrong_repo") in ("frontend", "backend", "crm", "dali") else "",
                             "needs_info": d.get("needs_info") is True,
                             "questions": [str(q)[:300] for q in (d.get("questions") or [])[:3]] if isinstance(d.get("questions"), list) else []}))
           PY
@@ -238,7 +240,10 @@ jobs:
           report triage_done "Analysis finished" "$(jq -c '{summary:.cause, plan:.plan, risk:.risk}' "$RUNNER_TEMP/agent/triage-parsed.json")"
           if [ "$fixable" != "true" ]; then
             reason="$(jq -r '.reason' "$RUNNER_TEMP/agent/triage-parsed.json")"
-            if [ "$(jq -r '.needs_info and (.questions | length > 0)' "$RUNNER_TEMP/agent/triage-parsed.json")" = "true" ]; then
+            wrong="$(jq -r '.wrong_repo' "$RUNNER_TEMP/agent/triage-parsed.json")"
+            if [ -n "$wrong" ] && [ "$wrong" != "${GITHUB_REPOSITORY##*/}" ]; then
+              reason="This looks like a problem in $wrong, not in ${GITHUB_REPOSITORY##*/}. Change Where to $wrong in the incident details, then ask again. ${reason}"
+            elif [ "$(jq -r '.needs_info and (.questions | length > 0)' "$RUNNER_TEMP/agent/triage-parsed.json")" = "true" ]; then
               reason="More details are needed before the agents can work on this. Please answer in a note on this incident, then ask again: $(jq -r '[.questions | to_entries[] | "\(.key + 1)) \(.value)"] | join(" ")' "$RUNNER_TEMP/agent/triage-parsed.json")"
             fi
             report needs_human "${reason:-The agents could not find a safe code change for this. A person needs to look at it.}"
