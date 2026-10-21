@@ -13,6 +13,7 @@ Inventory, sales, purchases, accounting, HR and POS, built for business owners, 
 ![Next.js](https://img.shields.io/badge/Next.js-17191B?style=flat-square&logo=nextdotjs&logoColor=white)
 ![Node.js](https://img.shields.io/badge/Node.js-326CFE?style=flat-square&logo=nodedotjs&logoColor=white)
 ![Docker](https://img.shields.io/badge/Docker-17191B?style=flat-square&logo=docker&logoColor=white)
+[![Website](https://img.shields.io/badge/supplyzpro.com-326CFE?style=flat-square&logo=googlechrome&logoColor=white)](https://www.supplyzpro.com)
 ![EN / FR](https://img.shields.io/badge/EN%20%2F%20FR-326CFE?style=flat-square)
 
 </div>
@@ -39,6 +40,7 @@ Access depends on role, subscription and company configuration.
 | Repo | Purpose |
 | --- | --- |
 | [`frontend`](https://github.com/supplyz-pro/frontend) | The SupplyzPro web application |
+| [`crm`](https://github.com/supplyz-pro/crm) | Customer relationship management |
 | [`backend`](https://github.com/supplyz-pro/backend) | APIs and business services |
 | [`landing-page`](https://github.com/supplyz-pro/landing-page) | Public website, blog and invoice generator |
 | [`academy`](https://github.com/supplyz-pro/academy) | Dalil Academy: learning paths for business owners and accountants |
