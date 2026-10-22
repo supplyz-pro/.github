@@ -73,7 +73,7 @@ jobs:
             sig="$(printf '%s' "$body" | openssl dgst -sha256 -hmac "$WEBHOOK_SECRET" | sed 's/^.* //')"
             key="$RUN_KEY-$phase-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-$(date +%s%N)"
             curl -sS -m 20 --retry 3 --retry-delay 2 -X POST "$CRM_URL/api/integrations/incidents/events" \
-              -H 'content-type: application/json' -H "idempotency-key: $key" -H "x-signature: $sig" --data-binary "$body" >/dev/null \
+              -H 'content-type: application/json' -H "idempotency-key: $key" -H "x-signature: $sig" --data-binary "$body" -o "$RUNNER_TEMP/agent/last-response.json" \
               || echo "::warning::could not report '$phase' to the CRM"
           }
           EOF
@@ -238,6 +238,8 @@ jobs:
           fixable="$(jq -r '.fixable' "$RUNNER_TEMP/agent/triage-parsed.json")"
           echo "fixable=$fixable" >> "$GITHUB_OUTPUT"
           report triage_done "Analysis finished" "$(jq -c '{summary:.cause, plan:.plan, risk:.risk}' "$RUNNER_TEMP/agent/triage-parsed.json")"
+          # The CRM creates the Linear ticket when it receives this report and answers with its id: the PR title carries it for the ticket check.
+          jq -r '.data.linear // empty' "$RUNNER_TEMP/agent/last-response.json" 2>/dev/null > "$RUNNER_TEMP/agent/linear.txt" || true
           if [ "$fixable" != "true" ]; then
             reason="$(jq -r '.reason' "$RUNNER_TEMP/agent/triage-parsed.json")"
             wrong="$(jq -r '.wrong_repo' "$RUNNER_TEMP/agent/triage-parsed.json")"
@@ -398,7 +400,8 @@ jobs:
             [ -n "$f" ] && printf '\n**Please check**\n%s\n' "$f"
             printf '\n---\nPrepared by Claude from the CRM incident. Cost of this run: $%s. [Run log](%s). Needs human review.\n' "${COST:-0}" "$RUN_URL"
           } > "$RUNNER_TEMP/agent/pr-body.md"
-          if ! url="$(gh pr create --base "$BASE" --head "$branch" --title "[INC-${{ inputs.number }}] ${TITLE:0:120}" --body-file "$RUNNER_TEMP/agent/pr-body.md" 2>"$RUNNER_TEMP/agent/pr.err")"; then
+          linear="$(tr -d '[:space:]' < "$RUNNER_TEMP/agent/linear.txt" 2>/dev/null || true)"
+          if ! url="$(gh pr create --base "$BASE" --head "$branch" --title "[INC-${{ inputs.number }}]${linear:+ $linear} ${TITLE:0:110}" --body-file "$RUNNER_TEMP/agent/pr-body.md" 2>"$RUNNER_TEMP/agent/pr.err")"; then
             report failed "The branch was pushed but the PR could not be opened: $(head -c 300 "$RUNNER_TEMP/agent/pr.err" | tr '\n' ' ')"; exit 0
           fi
           number="${url##*/}"
