@@ -1,7 +1,8 @@
 # Dev host disk controls (SUP-313)
 
 The 2026-10-28 incident exhausted the dev host root disk and crashed all CI runners.
-Application data and CI builds shared the same filesystem.
+Application data and CI builds shared the same filesystem. The two runners had
+39 GiB of abandoned MongoDB test databases in `/tmp` (46 GiB total writable data).
 
 CI for frontend, backend and Dali now defaults to GitHub-hosted runners. The shared
 Docker build workflow also builds remotely. The dev host only receives images and
@@ -15,9 +16,14 @@ keep their images protected. Under 25 GiB free it also prunes recent unused cach
 and unreferenced images older than 48 hours. A failed maintenance unit requires
 investigation; do not delete database volumes to make it pass.
 
-`disk-check.sh` rejects less than 20 GiB free or usage at/above 85%. Install it as
-`ACTIONS_RUNNER_HOOK_JOB_STARTED` on every dev runner. Restart idle runners after
-updating their `.env`. The backend's independent hourly GitHub-hosted health check
+`disk-check.sh` rejects less than 20 GiB free or usage at/above 85%. Copy
+`disk-check.sh`, `runner-cleanup.sh`, `runner-start.sh` into `/home/runner/` with
+the `supplyz-` prefix, executable by the runner. Set
+`ACTIONS_RUNNER_HOOK_JOB_STARTED=/home/runner/supplyz-runner-start.sh` and
+`ACTIONS_RUNNER_HOOK_JOB_COMPLETED=/home/runner/supplyz-runner-cleanup.sh` in
+each runner `.env`, then restart idle runners. Cleanup removes isolated MongoDB
+and Jest scratch directories older than one hour, and diagnostics older than
+seven days. It refuses cleanup while any MongoDB test process remains alive. The backend's independent hourly GitHub-hosted health check
 checks this reserve, timer activity and maintenance failures. GitHub workflow
 notification preferences determine who receives failure notifications.
 
