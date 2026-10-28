@@ -1,6 +1,6 @@
 name: Docker build
 
-# Reusable: build an image on the self-hosted runner and push it to GHCR.
+# Reusable: build an image on a GitHub-hosted runner and push it to GHCR.
 # Every image gets an immutable sha-<commit> tag plus an optional moving tag (dev, preprod, ...).
 on:
   workflow_call:
@@ -54,7 +54,7 @@ permissions:
 
 jobs:
   build:
-    runs-on: [self-hosted, supplyz-dev]
+    runs-on: ubuntu-latest
     timeout-minutes: 30
     outputs:
       tag: ${{ steps.meta.outputs.tag }}
@@ -96,8 +96,8 @@ jobs:
           [ "$PLAIN_SHA_TAG" != true ] || args+=(-t "$IMAGE:$SHORT")
           while IFS= read -r line; do [ -z "$line" ] || args+=(--build-arg "$line"); done <<< "$BUILD_ARGS"
           while IFS= read -r line; do [ -z "$line" ] || args+=(--label "$line"); done <<< "$EXTRA_LABELS"
-          # No --pull: the host keeps base images warm, so unchanged layers come straight from cache.
-          docker build "${args[@]}" "$CONTEXT"
+          # Builds run away from the application host; always refresh base images.
+          docker build --pull "${args[@]}" "$CONTEXT"
           docker push "$IMAGE:$TAG"
           [ -z "$MOVING_TAG" ] || docker push "$IMAGE:$MOVING_TAG"
           [ "$PLAIN_SHA_TAG" != true ] || docker push "$IMAGE:$SHORT"
