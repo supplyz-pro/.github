@@ -36,7 +36,7 @@ if docker inspect "$NAME" >/dev/null 2>&1; then
   docker stop "$PREVIOUS" >/dev/null   # frees the published port; kept for rollback
 fi
 
-args=(-d --name "$NAME" -p "$PUBLISH:$CPORT" --restart unless-stopped)
+args=(-d --log-driver local --log-opt max-size=10m --log-opt max-file=3 --name "$NAME" -p "$PUBLISH:$CPORT" --restart unless-stopped)
 [ -z "$NETWORK" ] || args+=(--network "$NETWORK")
 [ -z "$ENV_FILE" ] || args+=(--env-file "$ENV_FILE")
 # shellcheck disable=SC2206
