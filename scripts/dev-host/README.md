@@ -31,3 +31,21 @@ New deployments use Docker's rotating local logger (3 x 10 MB per container).
 Existing containers retain their current logging configuration until replaced.
 After installing, verify `systemctl list-timers supplyz-dev-disk-maintenance.timer`,
 run the maintenance service, and check `df -h /` plus the independent health workflow.
+
+## Existing ClickHouse log storm
+
+After disk recovery ClickHouse's failed file logger repeatedly wrote errors to
+an unbounded Docker JSON log, which grew past 35 GiB. New deployment defaults do
+not change existing container logging. Run `sudo python3 bound-clickhouse-logs.py`
+on the dev host, validate Compose, then recreate only the ClickHouse service:
+
+```sh
+cd /home/sami/langfuse-observe
+sudo docker compose -f docker-compose.yml -f docker-compose.override.yml config --quiet
+sudo docker compose -f docker-compose.yml -f docker-compose.override.yml up -d --no-deps --force-recreate clickhouse
+```
+
+The script backs up the existing override and preserves service settings and data
+mounts. It routes ClickHouse diagnostics to the console and caps Docker's local
+logs at 3 x 10 MB. Verify `SELECT 1`, unchanged data mounts, bounded logging, and
+stable free disk space. This recovered dev to about 61 GiB free / 51% used.
